@@ -11,6 +11,17 @@ checklist.
 
 ## [Unreleased]
 
+### Release — publishable on npm as `@askalf/claude-bridge`
+
+Phase 3 of the build-out. Prepares the package for npm publication and wires the release pipeline:
+
+- `package.json`: name changed to scoped `@askalf/claude-bridge` (matches the `@askalf/dario` convention). `private: true` removed — the package is now publishable. Added the fields npm registry shows on the package page (`repository`, `bugs`, `homepage`, `keywords`, `author`, `license`, `types`, `exports`), plus a `files` allowlist (`dist`, `hooks`, `README.md`, `LICENSE`, `SECURITY.md`, `CHANGELOG.md`) so the tarball ships only what users need, no source.
+- `prepublishOnly` script runs `npm run build && npm test` before publishing, so a local `npm publish` can't ship a stale `dist/` or a test-failing build. The CI publish workflow does the same checks earlier in its pipeline, making this a belt-and-braces guard for accidental manual publish.
+- New `.github/workflows/publish.yml` — fires on `release: [published]`, runs `npm ci → typecheck → build → test → --help smoke → npm publish --access public --provenance`. Provenance requires `id-token: write` and attaches a signed SLSA attestation so consumers can verify the tarball was built from this exact commit via Actions. Uses the `NPM_TOKEN` repository secret.
+- README install snippet gains the `npm install -g @askalf/claude-bridge` option alongside the clone-and-build path. CLI examples use the `claude-bridge` binary name (with a note on how to invoke when cloned).
+
+The first release tag after this merges — `v0.1.0` — will trigger the publish workflow and put the package on npm. Nothing in runtime behavior changes.
+
 ### Tests — behavioural coverage for response-injector, session-watcher helpers, allowlist
 
 Pure-function extraction + behavioural tests for the three modules with the most regression risk: credential/IPC plumbing (`response-injector`), JSONL parsing (`session-watcher`), allowlist auth (`discord-bot`). 4 → 24 tests.

@@ -1,0 +1,38 @@
+name: Publish to npm
+
+# Fires when a GitHub Release is published for this repo. The release tag
+# (e.g. v0.1.0) should match package.json's `version` — the workflow
+# doesn't enforce that, but publishing a mismatched version will either
+# succeed (if the package.json number isn't already on npm) and create a
+# confusing tag/version relationship, or fail (if the package.json number
+# is already published). Keep them in sync at release-prep time.
+#
+# `--provenance` requires id-token: write and publishes a signed SLSA
+# attestation alongside the tarball, so consumers can verify the package
+# was built from this exact commit via GitHub Actions.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+      - run: node dist/index.js --help
+      - run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
