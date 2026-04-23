@@ -110,7 +110,7 @@ export class SessionWatcher extends EventEmitter {
               this.emit('session', {
                 type: 'waiting',
                 sessionId,
-                projectPath: this.projectName(dir),
+                projectPath: projectName(dir),
                 content: lastMessage,
                 timestamp: now,
               } satisfies SessionEvent);
@@ -140,7 +140,7 @@ export class SessionWatcher extends EventEmitter {
             // Claude Code JSONL: entry.message.content[].text
             const msg = entry.message as Record<string, unknown> | undefined;
             const content = msg?.content;
-            const text = this.extractText(content);
+            const text = extractText(content);
             if (text && text.length > 5) return text.slice(0, 1500);
           }
         } catch {}
@@ -149,18 +149,35 @@ export class SessionWatcher extends EventEmitter {
     return '';
   }
 
-  private extractText(content: unknown): string {
-    if (typeof content === 'string') return content;
-    if (Array.isArray(content)) {
-      return content
-        .filter((b: { type?: string }) => b.type === 'text')
-        .map((b: { text?: string }) => b.text ?? '')
-        .join('\n');
-    }
-    return '';
-  }
+}
 
-  private projectName(dir: string): string {
-    return (dir.split(/[/\\]/).pop() ?? '').replace(/^[A-Z]--/, '').replace(/-/g, ' > ').slice(0, 60);
+// ── Pure helpers, exported for unit testing ──
+
+/**
+ * Pull the plain text out of a Claude Code JSONL `message.content` field.
+ * CC's wire format is either a bare string (old sessions) or an array of
+ * content blocks where `{ type: 'text', text: '...' }` carries the chat
+ * text. Tool-use and tool-result blocks are skipped — they're not the
+ * "last thing Claude said" a human would want to see in a Discord ping.
+ */
+export function extractText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((b: { type?: string }) => b.type === 'text')
+      .map((b: { text?: string }) => b.text ?? '')
+      .join('\n');
   }
+  return '';
+}
+
+/**
+ * Project directory name → human-readable breadcrumb.
+ * CC encodes a project's full path in the directory name by replacing
+ * `/` with `-` (e.g. `-Users-alice-src-foo` for `/Users/alice/src/foo`).
+ * On Windows CC prefixes the drive letter as `C--`. We reverse both and
+ * render as a `>`-separated breadcrumb, capped at 60 chars for Discord.
+ */
+export function projectName(dir: string): string {
+  return (dir.split(/[/\\]/).pop() ?? '').replace(/^[A-Z]--/, '').replace(/-/g, ' > ').slice(0, 60);
 }
