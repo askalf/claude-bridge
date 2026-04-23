@@ -1,18 +1,27 @@
 #!/bin/bash
-# Claude Code hook — check for pending Discord replies
-# Runs on Stop event (after Claude finishes responding)
-# If a reply exists, outputs it as additional context
+# Claude Code hook — relay a pending Discord reply into the CC session.
+#
+# Install by adding to `~/.claude/settings.json`:
+#   {
+#     "hooks": {
+#       "Stop": "bash /path/to/claude-bridge/hooks/check-reply.sh"
+#     }
+#   }
+#
+# Uses the claude-bridge CLI's `--check` mode to read and consume any
+# pending reply, so this script has zero deps beyond claude-bridge being
+# on PATH (via `npm install -g @askalf/claude-bridge` or a symlink from
+# a cloned repo's `dist/index.js`). The previous version required
+# python3 to parse the pending-reply JSON — dropped for portability.
 
-REPLY_FILE="$HOME/.claude-bridge/pending-reply.txt"
+set -euo pipefail
 
-if [ -f "$REPLY_FILE" ]; then
-  CONTENT=$(cat "$REPLY_FILE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('content',''))" 2>/dev/null)
-  AUTHOR=$(cat "$REPLY_FILE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('author',''))" 2>/dev/null)
+if ! command -v claude-bridge >/dev/null 2>&1; then
+  # claude-bridge not installed / not on PATH — nothing to relay, exit quietly.
+  exit 0
+fi
 
-  if [ -n "$CONTENT" ]; then
-    # Output as context — Claude will see this as a system reminder
-    echo "[Discord reply from $AUTHOR]: $CONTENT"
-    # Consume the reply
-    rm -f "$REPLY_FILE"
-  fi
+CONTENT=$(claude-bridge --check 2>/dev/null || true)
+if [ -n "$CONTENT" ]; then
+  echo "[Discord reply]: $CONTENT"
 fi
