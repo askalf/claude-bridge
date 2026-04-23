@@ -11,6 +11,16 @@ checklist.
 
 ## [Unreleased]
 
+### Tests — behavioural coverage for response-injector, session-watcher helpers, allowlist
+
+Pure-function extraction + behavioural tests for the three modules with the most regression risk: credential/IPC plumbing (`response-injector`), JSONL parsing (`session-watcher`), allowlist auth (`discord-bot`). 4 → 24 tests.
+
+- **`response-injector` refactored for hermetic testing.** `writePendingReply`, `readPendingReply`, `hasPendingReply`, `getReplyHistory` all accept an optional `dir` parameter (defaults to `~/.claude-bridge/`). Tests use `mkdtempSync` for a per-test throwaway dir; end-user callers never pass `dir` and get the original behavior. 6 new tests: round-trip, empty-state, corrupt-file, history ordering, history 500-line cap.
+- **`session-watcher` exports the pure helpers** `extractText` and `projectName` at module level. The class still uses them internally; tests import them directly without instantiating `SessionWatcher`. 10 new tests covering CC JSONL content-block extraction (string / text-array / tool-use-blocks skipped / empty / non-text), plus `projectName` across Linux/Mac/Windows paths and the 60-char cap.
+- **`discord-bot` exports `isAllowed(allowedUserIds, authorId)`** as a pure function; the `messageCreate` handler calls it instead of inlining the branch. 4 new tests pin the current "empty/undefined list = anyone allowed" default (documented footgun) so any future default-deny flip shows up as a test diff in the PR.
+
+Total: 24 passing tests across 4 files. `node --test test/*.test.mjs` runs in ~1.8s. Smoke test from Phase 1 still pins module export surface; Phase 3.3 adds the behaviour-level coverage underneath it.
+
 ### Agent — generic system prompt, config wire-through, command-injection fix
 
 Phase 2 of the build-out: fix what the code-review pass surfaced.

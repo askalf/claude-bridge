@@ -12,6 +12,21 @@ export interface DiscordConfig {
   allowedUserIds?: string[]; // if set, only these users can send replies
 }
 
+/**
+ * Is this Discord user ID allowed to send commands?
+ *
+ * Current contract (matches README): an empty or missing `allowedUserIds`
+ * list means **anyone** in the channel is allowed. That's a footgun — a
+ * user forgetting to set the field opens the bot to any channel member —
+ * but changing the default is a breaking change. Exported so the
+ * behavior can be pinned by a unit test; also so callers can audit
+ * "what would happen" without triggering a Discord round-trip.
+ */
+export function isAllowed(allowedUserIds: string[] | undefined, authorId: string): boolean {
+  if (!allowedUserIds || allowedUserIds.length === 0) return true;
+  return allowedUserIds.includes(authorId);
+}
+
 export class DiscordBot extends EventEmitter {
   private client: Client;
   private channel: TextChannel | null = null;
@@ -69,12 +84,10 @@ export class DiscordBot extends EventEmitter {
       processed.add(msg.id);
       if (processed.size > 100) processed.delete(processed.values().next().value!);
 
-      // Auth check — only allowed users can control Claude
-      if (config.allowedUserIds && config.allowedUserIds.length > 0) {
-        if (!config.allowedUserIds.includes(msg.author.id)) {
-          await msg.react('\u274C').catch(() => {}); // red X
-          return;
-        }
+      // Auth check — only allowed users can control the agent.
+      if (!isAllowed(config.allowedUserIds, msg.author.id)) {
+        await msg.react('\u274C').catch(() => {}); // red X
+        return;
       }
 
       // Acknowledge
