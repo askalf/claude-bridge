@@ -26,11 +26,11 @@ Routing goes through [dario](https://github.com/askalf/dario), so every agent ca
 ## 60 seconds
 
 ```bash
-# 1. Install
-git clone https://github.com/askalf/claude-bridge
-cd claude-bridge
-npm install
-npm run build
+# 1. Install (pick one)
+npm install -g @askalf/claude-bridge                     # global
+#   — or —
+git clone https://github.com/askalf/claude-bridge && cd claude-bridge
+npm install && npm run build
 
 # 2. Start dario if you haven't already — https://github.com/askalf/dario
 dario proxy                                              # http://localhost:3456
@@ -53,7 +53,9 @@ JSON
 chmod 600 ~/.claude-bridge/config.json                   # protect the token
 
 # 5. Run
-node dist/index.js                                       # start the bridge
+claude-bridge                                            # if installed via npm -g
+#   — or —
+node dist/index.js                                       # if cloned
 ```
 
 When Claude Code goes idle in a session, you'll get a Discord message with the last few transcript lines. Reply and the agent loop runs against your machine.
@@ -151,11 +153,13 @@ All fields can also be set via environment variables — field name uppercased w
 ## CLI
 
 ```bash
-node dist/index.js                # start the bridge (foreground)
-node dist/index.js --check        # read any pending Discord reply, exit
-node dist/index.js --history      # show recent Discord replies, exit
-node dist/index.js --help         # show usage
+claude-bridge                     # start the bridge (foreground)
+claude-bridge --check             # read any pending Discord reply, exit
+claude-bridge --history           # show recent Discord replies, exit
+claude-bridge --help              # show usage
 ```
+
+(If you cloned the repo rather than installing via npm, substitute `node dist/index.js` for `claude-bridge`.)
 
 ### Discord commands (sent as messages in your channel)
 

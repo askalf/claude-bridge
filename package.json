@@ -1,5 +1,5 @@
 {
-  "name": "claude-bridge",
+  "name": "@askalf/claude-bridge",
   "version": "0.1.0",
   "description": "Bridge Claude Code sessions to Discord. Stay in sync on the go.",
   "type": "module",
@@ -7,12 +7,28 @@
     "claude-bridge": "./dist/index.js"
   },
   "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "hooks",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "CHANGELOG.md"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
     "discord.js": "^14.16.0"
@@ -22,8 +38,29 @@
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   },
-  "private": true,
   "engines": {
     "node": ">=18.0.0"
-  }
+  },
+  "author": "askalf",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/askalf/claude-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/askalf/claude-bridge/issues"
+  },
+  "homepage": "https://github.com/askalf/claude-bridge#readme",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "discord",
+    "bot",
+    "agent",
+    "remote-control",
+    "anthropic",
+    "ai",
+    "llm",
+    "dario"
+  ]
 }
