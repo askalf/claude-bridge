@@ -2,7 +2,7 @@
  * Watch for Claude Code sessions that are genuinely waiting for user input.
  *
  * Strategy: Only track sessions modified in the last 2 minutes.
- * Only emit 'waiting' after 60 seconds of zero changes.
+ * Only emit 'waiting' after `idleSeconds` of zero changes (default 60s).
  * Max one notification per session until the file changes again.
  */
 
@@ -12,7 +12,7 @@ import { homedir } from 'node:os';
 import { EventEmitter } from 'node:events';
 
 export interface SessionEvent {
-  type: 'waiting' | 'session_start' | 'session_end' | 'assistant_response';
+  type: 'waiting';
   sessionId: string;
   projectPath?: string;
   content?: string;
@@ -26,27 +26,29 @@ interface TrackedSession {
   lastModified: number;
   lastChangeSeen: number;
   notifiedIdle: boolean;
-  awaitingResponse: boolean; // true after a reply was injected
-  lastReadSize: number;      // last byte position we read content from
 }
 
-const IDLE_THRESHOLD_MS = 60_000;    // 60s of no changes = actually idle
-const ACTIVE_WINDOW_MS = 2 * 60_000; // only track files modified in last 2 min
+const DEFAULT_IDLE_THRESHOLD_MS = 60_000;  // 60s of no changes = actually idle
+const ACTIVE_WINDOW_MS = 2 * 60_000;       // only track files modified in last 2 min
 
 export class SessionWatcher extends EventEmitter {
   private claudeDir: string;
   private pollInterval: ReturnType<typeof setInterval> | null = null;
   private sessions = new Map<string, TrackedSession>();
+  private idleThresholdMs: number = DEFAULT_IDLE_THRESHOLD_MS;
 
   constructor() {
     super();
     this.claudeDir = join(homedir(), '.claude');
   }
 
-  start(pollMs: number = 10_000): void {
+  start(pollMs: number = 10_000, idleSeconds?: number): void {
+    if (typeof idleSeconds === 'number' && idleSeconds > 0) {
+      this.idleThresholdMs = idleSeconds * 1000;
+    }
     this.pollInterval = setInterval(() => this.poll(), pollMs);
     this.pollInterval.unref();
-    console.log(`[bridge] Watching ${this.claudeDir}/projects/ (poll every ${pollMs / 1000}s, idle threshold ${IDLE_THRESHOLD_MS / 1000}s)`);
+    console.log(`[bridge] Watching ${this.claudeDir}/projects/ (poll every ${pollMs / 1000}s, idle threshold ${this.idleThresholdMs / 1000}s)`);
   }
 
   stop(): void {
@@ -87,29 +89,23 @@ export class SessionWatcher extends EventEmitter {
                 lastModified: stat.mtimeMs,
                 lastChangeSeen: now,
                 notifiedIdle: false,
-                awaitingResponse: false,
-                lastReadSize: stat.size,
               });
               continue;
             }
 
-            // File changed
+            // File changed — reset idle tracking.
             if (stat.size !== existing.lastSize || stat.mtimeMs !== existing.lastModified) {
-              const grew = stat.size > existing.lastSize;
               existing.lastSize = stat.size;
               existing.lastModified = stat.mtimeMs;
               existing.lastChangeSeen = now;
               existing.notifiedIdle = false;
-
-              // Response detection disabled — agent sends responses directly to Discord
               continue;
             }
 
-            // File unchanged — check idle
+            // File unchanged for >= idle threshold — emit 'waiting' once.
             const idleMs = now - existing.lastChangeSeen;
-            if (idleMs >= IDLE_THRESHOLD_MS && !existing.notifiedIdle) {
+            if (idleMs >= this.idleThresholdMs && !existing.notifiedIdle) {
               existing.notifiedIdle = true;
-              // Read the last assistant message for context
               const lastMessage = this.getLastAssistantMessage(existing.path);
               this.emit('session', {
                 type: 'waiting',
@@ -119,8 +115,6 @@ export class SessionWatcher extends EventEmitter {
                 timestamp: now,
               } satisfies SessionEvent);
             }
-
-            // Response detection disabled — agent handles responses directly
           } catch {}
         }
       } catch {}
@@ -153,56 +147,6 @@ export class SessionWatcher extends EventEmitter {
       }
     } catch {}
     return '';
-  }
-
-  /** Mark the most recently active session as awaiting a response. */
-  markAwaitingResponse(): void {
-    let mostRecent: TrackedSession | null = null;
-    let mostRecentTime = 0;
-    for (const s of this.sessions.values()) {
-      if (s.lastChangeSeen > mostRecentTime) {
-        mostRecent = s;
-        mostRecentTime = s.lastChangeSeen;
-      }
-    }
-    if (mostRecent) {
-      mostRecent.awaitingResponse = true;
-      mostRecent.lastReadSize = mostRecent.lastSize;
-    }
-  }
-
-  /** Check for new assistant messages in the JSONL transcript. */
-  private checkForAssistantResponse(session: TrackedSession, sessionId: string): void {
-    try {
-      const data = readFileSync(session.path, 'utf-8');
-      // Only look at content added since lastReadSize
-      const newContent = data.slice(session.lastReadSize);
-      if (!newContent.trim()) return;
-
-      const lines = newContent.trim().split('\n');
-      for (const line of lines.reverse()) {
-        try {
-          const entry = JSON.parse(line) as Record<string, unknown>;
-          if (entry.type === 'assistant') {
-            const msg = entry.message as Record<string, unknown> | undefined;
-            const text = this.extractText(msg?.content);
-            if (text && text.length > 10) {
-              session.awaitingResponse = false;
-              session.lastReadSize = data.length;
-              this.emit('session', {
-                type: 'assistant_response',
-                sessionId,
-                projectPath: this.projectName(session.dir),
-                content: text.slice(0, 1800),
-                timestamp: Date.now(),
-              } satisfies SessionEvent);
-              return;
-            }
-          }
-        } catch {}
-      }
-      session.lastReadSize = data.length;
-    } catch {}
   }
 
   private extractText(content: unknown): string {

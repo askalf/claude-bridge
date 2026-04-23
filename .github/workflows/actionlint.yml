@@ -6,15 +6,14 @@ name: actionlint
 # otherwise only surface at workflow-fire time.
 
 on:
+  # Runs on every PR + every push to master, not just workflow changes.
+  # Rationale: actionlint is in master's required-status-checks list, and
+  # path-filtered required checks can never report on PRs that don't
+  # touch the filtered paths — leaving the merge permanently blocked.
+  # 30s of CI on unrelated PRs is cheaper than that failure mode.
   pull_request:
-    paths:
-      - '.github/workflows/**'
-      - '.github/actionlint.yaml'
   push:
     branches: [master]
-    paths:
-      - '.github/workflows/**'
-      - '.github/actionlint.yaml'
   workflow_dispatch: {}
 
 permissions:

@@ -11,6 +11,31 @@ checklist.
 
 ## [Unreleased]
 
+### Agent — generic system prompt, config wire-through, command-injection fix
+
+Phase 2 of the build-out: fix what the code-review pass surfaced.
+
+**Security**
+
+- **Removed personal-context leak in the default system prompt.** The old prompt said "You are the askalf engineering assistant, running on Thomas's machine… mux is at integration.tax… 17 fleet agents running in Docker (forge)." That was shipping to every user who installed the package. New default prompt is generic ("a coding and operations assistant running on the user's local machine") and callers can override via the `system_prompt` config field or `AGENT_SYSTEM_PROMPT` env var.
+- **Fixed command-injection risk in `Glob` and `Grep` tools.** Both used `execSync` with LLM-controlled `pattern` / `dir` values interpolated into a shell string — a `pattern` like `"; rm -rf /tmp; echo "` would have executed. Now uses `execFileSync` with an argv array so arguments are passed as distinct `argv[]` entries, not spliced into a shell command.
+- **Removed the `Bash` blocklist** (`['rm -rf /', 'mkfs', 'dd if=', …]`). A string-match blocklist on shell input is trivially bypassed with whitespace or path tricks; the false sense of security was worse than owning the threat model explicitly. Added a comment at the top of `executeTool` stating that the allowlist in `discord-bot` is the security boundary — if shell access to your machine from a chat client isn't acceptable, don't run claude-bridge.
+
+**Correctness / README ↔ code drift**
+
+- **`Config` interface aligned with the README's documented surface.** Added `idle_seconds`, `dario_base_url`, `dario_api_key`, `agent_model`, `agent_cwd`, `system_prompt`. Removed `notify_on_session_start` / `notify_on_session_end` (documented in the in-`--help` text but never actually emitted by the watcher — dead config).
+- **`loadConfig` env-var overrides for every field**, as the README promised. Env wins over file. Mapping is `field_name` → `FIELD_NAME`.
+- **`/status` command now uses `config.dario_base_url`** instead of hardcoded `http://localhost:3456/health`.
+- **Agent reads `dario_base_url` / `dario_api_key` / `agent_model` / `agent_cwd` / `system_prompt` from config** instead of hardcoded values. Env vars `DARIO_URL`, `DARIO_API_KEY`, `AGENT_MODEL`, `AGENT_CWD`, `AGENT_SYSTEM_PROMPT` are still honored as fallback.
+- **`poll_interval_ms` default aligned to 10 000ms** (matching the README) in both the initial start and the watchdog-restart path. Previously 3000ms on start, 10000ms on restart.
+- **`idle_seconds` is now actually honored** — was a hardcoded 60s constant in `session-watcher.ts`; now threaded from config through `SessionWatcher.start(pollMs, idleSeconds)`.
+
+**Dead-code cleanup**
+
+- Removed `SessionWatcher.markAwaitingResponse` and the private `checkForAssistantResponse` — the only code path that consumed `awaitingResponse` / `lastReadSize` state was never reachable (a `continue` skipped past it). Dropped the supporting fields from `TrackedSession`.
+- Removed the unused `SessionEvent` types `session_start`, `session_end`, `assistant_response` — never emitted.
+- Removed the unused `MAX_OUTPUT` constant in `agent.ts`.
+
 ### CI — foundation parity with dario
 
 Brings claude-bridge's CI surface up to the maturity of the askalf/dario repo it integrates with:
