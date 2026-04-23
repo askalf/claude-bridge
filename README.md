@@ -139,9 +139,12 @@ One background loop polls `~/.claude/` for active sessions. When a session's JSO
 | `notify_on_waiting` | boolean | `true` | When false, idle-state events are detected but no Discord message is sent. Useful for testing. |
 | `idle_seconds` | number | `60` | How long a session must be idle before emitting a notification. |
 | `dario_base_url` | string | `http://localhost:3456` | dario (or any Anthropic-compat) endpoint. |
-| `dario_api_key` | string | `dario` | Key sent in `x-api-key`. |
+| `dario_api_key` | string | `dario` | Key sent in `x-api-key`. Change this if you've set `DARIO_API_KEY` on your proxy. |
+| `agent_model` | string | `claude-sonnet-4-6` | Model ID passed to the proxy. |
+| `agent_cwd` | string | `$HOME` | Working directory for the agent's `Bash` / `Glob` / `Grep` tools. |
+| `system_prompt` | string | *(generic coding-assistant prompt)* | Override the agent's default system prompt. Useful for scoping the agent to a specific project, persona, or workflow. |
 
-All fields can also be set via `DISCORD_TOKEN`, `DISCORD_CHANNEL_ID`, etc. env vars. Env wins over the file.
+All fields can also be set via environment variables — field name uppercased with prefixes for the Discord/Dario/agent groups: `DISCORD_TOKEN`, `DISCORD_CHANNEL_ID`, `ALLOWED_USER_IDS` (comma-separated), `POLL_INTERVAL_MS`, `IDLE_SECONDS`, `NOTIFY_ON_WAITING`, `DARIO_BASE_URL`, `DARIO_API_KEY`, `AGENT_MODEL`, `AGENT_CWD`, `AGENT_SYSTEM_PROMPT`. **Env wins over the file** — lets you rotate a compromised bot token in a container without editing the committed config.
 
 ---
 

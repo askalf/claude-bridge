@@ -1,18 +1,30 @@
 /**
  * Discord-native Claude agent.
  * Full agent loop running over Discord — no Claude Code CLI needed.
- * Uses dario proxy for OAuth/billing, executes tools locally.
+ * Uses a dario-compatible proxy (or any Anthropic-compat endpoint) for
+ * OAuth / billing, executes tools locally on the host machine.
  */
 
-import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { execSync, execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { homedir } from 'node:os';
 
-const DARIO_URL = process.env.DARIO_URL || 'http://localhost:3456';
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
+const DEFAULT_BASE_URL = 'http://localhost:3456';
+const DEFAULT_API_KEY = 'dario';
 const MAX_TURNS = 30;
-const MAX_OUTPUT = 1500; // Discord message limit safety
+
+// Default system prompt: intentionally generic. Callers who want to
+// specialize the agent for a project / persona / tool style pass their
+// own via `systemPrompt` in the constructor options (which the CLI
+// surfaces as the `system_prompt` config field). Don't hardcode
+// user-specific context here — this file ships in the public package.
+const DEFAULT_SYSTEM_PROMPT = [
+  'You are a coding and operations assistant running on the user\'s local machine via a Discord bridge. You have full tool access to the host filesystem and shell (Bash, Read, Write, Glob, Grep).',
+  '',
+  'Use tools to ground your answers — don\'t guess at file contents, project layout, or git state when you can look them up. Keep responses under the Discord 2000-char limit; use code blocks for command output; skip emojis unless the user uses them first.',
+].join('\n');
 
 // ── Tool definitions matching Claude Code ──
 
@@ -80,20 +92,27 @@ const TOOLS = [
 
 // ── Tool execution ──
 
-function executeTool(name: string, input: Record<string, unknown>): string {
+// SECURITY: every tool here runs on the host with the running user's
+// full shell access. The security model is the allowlist in discord-bot:
+// a user not in `allowed_user_ids` can't emit a tool call at all. We
+// intentionally don't try to filter dangerous commands at this layer —
+// a blocklist on shell input is trivially bypassed (whitespace tricks,
+// path obfuscation, shell indirection) and the false-sense-of-security
+// it gives is worse than explicit "yes, this is a high-trust tool."
+//
+// If you can't tolerate shell-level access to your machine from a chat
+// client, don't run claude-bridge.
+function executeTool(name: string, input: Record<string, unknown>, cwd: string): string {
   try {
     switch (name) {
       case 'Bash': {
         const cmd = input.command as string;
-        // Security: block dangerous commands
-        const blocked = ['rm -rf /', 'mkfs', 'dd if=', ':(){', 'fork bomb'];
-        if (blocked.some(b => cmd.includes(b))) return 'Blocked: dangerous command';
         const timeout = (input.timeout as number) || 30_000;
         const output = execSync(cmd, {
           encoding: 'utf-8',
           timeout,
           maxBuffer: 1024 * 1024,
-          cwd: process.env.AGENT_CWD || homedir(),
+          cwd,
         });
         return output.slice(0, 10_000);
       }
@@ -110,27 +129,47 @@ function executeTool(name: string, input: Record<string, unknown>): string {
       }
 
       case 'Glob': {
-        const dir = (input.path as string) || process.env.AGENT_CWD || '.';
+        // execFileSync with argv array — args are passed to find(1) as
+        // distinct argv[] entries, not spliced into a shell string, so
+        // metacharacters in `pattern` or `dir` can't escape into shell.
+        const dir = (input.path as string) || cwd;
         const pattern = input.pattern as string;
-        // Simple glob via find/ls
         try {
-          const output = execSync(
-            `find "${dir}" -name "${pattern}" -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | head -50`,
-            { encoding: 'utf-8', timeout: 10_000 }
+          const output = execFileSync(
+            'find',
+            [
+              dir,
+              '-name', pattern,
+              '-not', '-path', '*/node_modules/*',
+              '-not', '-path', '*/.git/*',
+            ],
+            { encoding: 'utf-8', timeout: 10_000, maxBuffer: 1024 * 1024 },
           );
-          return output || 'No matches';
+          const lines = output.split('\n').filter(Boolean).slice(0, 50);
+          return lines.length > 0 ? lines.join('\n') : 'No matches';
         } catch { return 'No matches'; }
       }
 
       case 'Grep': {
-        const dir = (input.path as string) || process.env.AGENT_CWD || '.';
+        const dir = (input.path as string) || cwd;
         const pattern = input.pattern as string;
         try {
-          const output = execSync(
-            `grep -rn "${pattern}" "${dir}" --include="*.ts" --include="*.js" --include="*.json" --include="*.md" --include="*.py" 2>/dev/null | head -30`,
-            { encoding: 'utf-8', timeout: 10_000 }
+          const output = execFileSync(
+            'grep',
+            [
+              '-rn',
+              '--include=*.ts',
+              '--include=*.js',
+              '--include=*.json',
+              '--include=*.md',
+              '--include=*.py',
+              pattern,
+              dir,
+            ],
+            { encoding: 'utf-8', timeout: 10_000, maxBuffer: 1024 * 1024 },
           );
-          return output || 'No matches';
+          const lines = output.split('\n').filter(Boolean).slice(0, 30);
+          return lines.length > 0 ? lines.join('\n') : 'No matches';
         } catch { return 'No matches'; }
       }
 
@@ -144,30 +183,39 @@ function executeTool(name: string, input: Record<string, unknown>): string {
 
 // ── Agent loop ──
 
+export interface DiscordAgentOptions {
+  /** Model ID to send to the proxy. Default: claude-sonnet-4-6. */
+  model?: string;
+  /** Working directory for Bash / Glob / Grep. Default: $AGENT_CWD or homedir. */
+  cwd?: string;
+  /** Anthropic-compat base URL. Default: http://localhost:3456 (dario). */
+  baseUrl?: string;
+  /** API key sent as x-api-key. Default: "dario" (matches dario's default). */
+  apiKey?: string;
+  /** Override the default system prompt with your own. */
+  systemPrompt?: string;
+}
+
 export class DiscordAgent {
   private messages: Array<Record<string, unknown>> = [];
   private model: string;
+  private cwd: string;
+  private baseUrl: string;
+  private apiKey: string;
   private systemPrompt: string;
   private busy = false;
 
-  constructor(opts?: { model?: string; cwd?: string }) {
-    this.model = opts?.model || DEFAULT_MODEL;
-    const cwd = opts?.cwd || process.env.AGENT_CWD || homedir();
-    this.systemPrompt = `You are the askalf engineering assistant, running on Thomas's machine via Discord. You have full tool access to the local filesystem and shell.
+  constructor(opts: DiscordAgentOptions = {}) {
+    this.model = opts.model || DEFAULT_MODEL;
+    this.cwd = opts.cwd || process.env.AGENT_CWD || homedir();
+    this.baseUrl = opts.baseUrl || process.env.DARIO_URL || DEFAULT_BASE_URL;
+    this.apiKey = opts.apiKey || process.env.DARIO_API_KEY || DEFAULT_API_KEY;
 
-Working directory: ${cwd}
-
-You work for Thomas (askalf). Use tools to discover projects, check git repos, read files — don't guess. If you don't know something, look it up with Bash, Read, Glob, or Grep.
-
-Key context:
-- dario v3.0.0 uses template replay (cc-template.ts) — replaces entire request with CC template
-- mux is at integration.tax, landing page live, waitlist active
-- All Cloudflare: askalf.org (landing), app.askalf.org (dashboard), integration.tax (mux)
-- Auth system live on CF Workers + D1
-- 17 fleet agents running in Docker (forge)
-- Claude bridge (this) provides Discord remote access
-
-Keep responses concise — Discord has a 2000 char limit. Use code blocks for output. Don't add emojis unless asked.`;
+    const customPrompt = opts.systemPrompt ?? process.env.AGENT_SYSTEM_PROMPT;
+    const base = customPrompt && customPrompt.trim().length > 0
+      ? customPrompt
+      : DEFAULT_SYSTEM_PROMPT;
+    this.systemPrompt = `${base}\n\nWorking directory: ${this.cwd}`;
   }
 
   get isBusy(): boolean { return this.busy; }
@@ -215,7 +263,7 @@ Keep responses concise — Discord has a 2000 char limit. Use code blocks for ou
 
             if (onToolUse) onToolUse(name, JSON.stringify(args).slice(0, 100));
 
-            const output = executeTool(name, args);
+            const output = executeTool(name, args, this.cwd);
             toolResults.push({
               type: 'tool_result',
               tool_use_id: toolId,
@@ -235,14 +283,14 @@ Keep responses concise — Discord has a 2000 char limit. Use code blocks for ou
     }
   }
 
-  /** Call the Anthropic API through dario proxy. */
+  /** Call the Anthropic-compat API (dario by default). */
   private async callApi(): Promise<Record<string, unknown> | null> {
     try {
-      const res = await fetch(`${DARIO_URL}/v1/messages`, {
+      const res = await fetch(`${this.baseUrl}/v1/messages`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-api-key': 'dario',
+          'x-api-key': this.apiKey,
           'anthropic-version': '2023-06-01',
         },
         body: JSON.stringify({

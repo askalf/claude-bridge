@@ -49,35 +49,62 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 
 interface Config {
+  // Required
   discord_token: string;
   discord_channel_id: string;
-  allowed_user_ids?: string[];  // Discord user IDs that can reply (empty = anyone)
+  // Auth
+  allowed_user_ids?: string[];
+  // Watcher
   poll_interval_ms?: number;
+  idle_seconds?: number;
+  // Notifications
   notify_on_waiting?: boolean;
+  // Agent / proxy
+  dario_base_url?: string;
+  dario_api_key?: string;
+  agent_model?: string;
+  agent_cwd?: string;
+  system_prompt?: string;
 }
 
+// Env vars win over the config file — the README promises this. Used to
+// let users override a committed config without editing it (e.g.
+// bot-token rotation in a container without redeploying).
 function loadConfig(): Config {
-  // Check CLI args
   const configArg = process.argv.find(a => a.startsWith('--config='));
   const configPath = configArg
     ? configArg.split('=')[1]
     : join(homedir(), '.claude-bridge', 'config.json');
 
-  // Try config file first
+  let fromFile: Partial<Config> = {};
   if (existsSync(configPath)) {
     try {
-      const data = JSON.parse(readFileSync(configPath, 'utf-8')) as Config;
-      return data;
+      fromFile = JSON.parse(readFileSync(configPath, 'utf-8')) as Partial<Config>;
     } catch (e) {
       console.error(`[bridge] Failed to parse config at ${configPath}:`, e);
     }
   }
 
-  // Fall back to env vars
-  const token = process.env.DISCORD_TOKEN;
-  const channelId = process.env.DISCORD_CHANNEL_ID;
+  const env = process.env;
+  const allowedFromEnv = env.ALLOWED_USER_IDS
+    ? env.ALLOWED_USER_IDS.split(',').map(s => s.trim()).filter(Boolean)
+    : undefined;
 
-  if (!token || !channelId) {
+  const cfg: Config = {
+    discord_token:           env.DISCORD_TOKEN      ?? fromFile.discord_token      ?? '',
+    discord_channel_id:      env.DISCORD_CHANNEL_ID ?? fromFile.discord_channel_id ?? '',
+    allowed_user_ids:        allowedFromEnv          ?? fromFile.allowed_user_ids,
+    poll_interval_ms:        numEnv(env.POLL_INTERVAL_MS)        ?? fromFile.poll_interval_ms,
+    idle_seconds:            numEnv(env.IDLE_SECONDS)            ?? fromFile.idle_seconds,
+    notify_on_waiting:       boolEnv(env.NOTIFY_ON_WAITING)       ?? fromFile.notify_on_waiting,
+    dario_base_url:          env.DARIO_BASE_URL ?? env.DARIO_URL  ?? fromFile.dario_base_url,
+    dario_api_key:           env.DARIO_API_KEY                    ?? fromFile.dario_api_key,
+    agent_model:             env.AGENT_MODEL                      ?? fromFile.agent_model,
+    agent_cwd:               env.AGENT_CWD                        ?? fromFile.agent_cwd,
+    system_prompt:           env.AGENT_SYSTEM_PROMPT              ?? fromFile.system_prompt,
+  };
+
+  if (!cfg.discord_token || !cfg.discord_channel_id) {
     console.error(`[bridge] Missing configuration. Either:
   1. Create ~/.claude-bridge/config.json:
      { "discord_token": "...", "discord_channel_id": "..." }
@@ -88,10 +115,21 @@ function loadConfig(): Config {
     process.exit(1);
   }
 
-  return {
-    discord_token: token,
-    discord_channel_id: channelId,
-  };
+  return cfg;
+}
+
+function numEnv(v: string | undefined): number | undefined {
+  if (!v) return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function boolEnv(v: string | undefined): boolean | undefined {
+  if (v === undefined) return undefined;
+  const lower = v.toLowerCase();
+  if (lower === 'true' || lower === '1' || lower === 'yes') return true;
+  if (lower === 'false' || lower === '0' || lower === 'no') return false;
+  return undefined;
 }
 
 async function main(): Promise<void> {
@@ -112,13 +150,18 @@ Environment:
 
 Config file (~/.claude-bridge/config.json):
   {
-    "discord_token": "...",
+    "discord_token":     "...",
     "discord_channel_id": "...",
-    "poll_interval_ms": 3000,
+    "allowed_user_ids":  ["..."],
+    "poll_interval_ms":  10000,
+    "idle_seconds":      60,
     "notify_on_waiting": true,
-    "notify_on_session_start": true,
-    "notify_on_session_end": false
+    "dario_base_url":    "http://localhost:3456",
+    "dario_api_key":     "dario",
+    "system_prompt":     "(optional — override the agent's default system prompt)"
   }
+
+Env vars override the file. See README for the full list.
 `);
     process.exit(0);
   }
@@ -176,10 +219,15 @@ Config file (~/.claude-bridge/config.json):
   const lastNotified = new Map<string, number>();
   const COOLDOWN_MS = 120_000; // 2 min between notifications for same session
 
-  // Discord agent — runs tool-equipped Claude directly, no CLI needed
+  // Discord agent — runs tool-equipped Claude directly, no CLI needed.
+  // All knobs threaded from config so env overrides and file settings
+  // stay on a single path; DiscordAgent's own defaults are the fallback.
   const agent = new DiscordAgent({
-    model: process.env.AGENT_MODEL || 'claude-sonnet-4-6',
-    cwd: process.env.AGENT_CWD,
+    model:        config.agent_model,
+    cwd:          config.agent_cwd,
+    baseUrl:      config.dario_base_url,
+    apiKey:       config.dario_api_key,
+    systemPrompt: config.system_prompt,
   });
 
   // Handle Discord replies
@@ -196,14 +244,15 @@ Config file (~/.claude-bridge/config.json):
     }
 
     if (content === '/status') {
-      const darioHealth = await fetch('http://localhost:3456/health').then(r => r.json()).catch(() => null);
-      bot.send(`**Status**\nAgent busy: ${agent.isBusy}\nDario: ${darioHealth ? 'healthy' : 'offline'}`).catch(() => {});
+      const baseUrl = config.dario_base_url ?? 'http://localhost:3456';
+      const darioHealth = await fetch(`${baseUrl}/health`).then(r => r.json()).catch(() => null);
+      bot.send(`**Status**\nAgent busy: ${agent.isBusy}\nProxy (${baseUrl}): ${darioHealth ? 'healthy' : 'offline'}`).catch(() => {});
       return;
     }
 
-    // Also save to pending file (for CLI sessions to pick up via hook)
+    // Also save to pending file so an in-session Claude Code hook can
+    // pick it up (see hooks/check-reply.sh).
     writePendingReply({ content, author: reply.author, timestamp: reply.timestamp });
-    watcher.markAwaitingResponse();
 
     // If message starts with !, run through the agent loop directly
     if (content.startsWith('!') || content.startsWith('/run ')) {
@@ -245,9 +294,9 @@ Config file (~/.claude-bridge/config.json):
     return chunks;
   }
 
-  // Start everything
+  // Start everything. Default poll interval matches the README (10s).
   await bot.start();
-  watcher.start(config.poll_interval_ms ?? 3000);
+  watcher.start(config.poll_interval_ms ?? 10_000, config.idle_seconds);
 
   console.log('[bridge] Watching for Claude Code sessions...');
   console.log('[bridge] Press Ctrl+C to stop.\n');
@@ -265,7 +314,7 @@ Config file (~/.claude-bridge/config.json):
     if (idle > WATCHDOG_TIMEOUT) {
       console.warn(`[bridge] Watchdog: no activity for ${Math.round(idle / 60_000)}min, restarting watcher...`);
       watcher.stop();
-      watcher.start(config.poll_interval_ms ?? 10_000);
+      watcher.start(config.poll_interval_ms ?? 10_000, config.idle_seconds);
       lastActivity = Date.now();
     }
   }, WATCHDOG_INTERVAL).unref();
