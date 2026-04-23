@@ -11,6 +11,15 @@ checklist.
 
 ## [Unreleased]
 
+### CI — stale-bot housekeeping + labels for parity with dario
+
+Phase 3.5, the "final polish" pass after v0.1.0 shipped:
+
+- **`.github/workflows/stale.yml`** — `actions/stale@v10.2.0`, once daily at 04:30 UTC. 60 days to warn, 14 more to close. Exempts `security` + `auth` (where threads can sit idle on upstream behavior without being our-side-resolvable), `review-feedback`, `help-wanted`, `good-first-issue`, `pinned` for issues; plus `wip` and `blocked` for PRs. `operations-per-run: 60` cap so first activation can't mass-close a backlog. `remove-stale-when-updated: true` resets the clock on any comment.
+- **Labels**, created out-of-band via `gh label create` (not in this PR): `security`, `auth`, `pinned`, `wip`, `blocked`, `review-feedback`. These are referenced by the stale-bot exempts above; they're also the vocabulary the auth issue template (eventual) will apply. Colors match dario's convention for cross-repo recognizability.
+
+No runtime-behavior change. 0 open issues at the time this lands, so the bot has nothing to act on today — it starts earning its keep the first time a thread goes dormant.
+
 ### Hooks — drop python3 dep from check-reply, add Windows PowerShell equivalent
 
 Phase 3.4. `hooks/check-reply.sh` previously parsed the pending-reply JSON via `python3 -c "import sys,json; …"` — a hard python3 dependency for a Node.js project, and silently no-op on systems without python3. Both fixed:
