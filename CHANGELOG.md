@@ -11,6 +11,15 @@ checklist.
 
 ## [Unreleased]
 
+### Hooks — drop python3 dep from check-reply, add Windows PowerShell equivalent
+
+Phase 3.4. `hooks/check-reply.sh` previously parsed the pending-reply JSON via `python3 -c "import sys,json; …"` — a hard python3 dependency for a Node.js project, and silently no-op on systems without python3. Both fixed:
+
+- **`hooks/check-reply.sh`** rewritten to delegate to `claude-bridge --check`, which consumes the pending reply and prints its content. Zero non-claude-bridge deps. Uses `command -v` to gracefully no-op if claude-bridge isn't on PATH (e.g. hook left in place after uninstall).
+- **`hooks/check-reply.ps1`** — new, does the same on Windows. Docstring includes the `settings.json` hook snippet to register it against CC's `Stop` event. Pre-1.0 users on Windows had no supported hook path; now they do.
+
+No runtime-behavior change for users who were already on the sh hook + had python3; the relayed content is the same. Readers on Linux/Mac who lacked python3 (or whose `python3` pointed at a broken install) get a working hook for the first time.
+
 ### Tests — behavioural coverage for response-injector, session-watcher helpers, allowlist
 
 Pure-function extraction + behavioural tests for the three modules with the most regression risk: credential/IPC plumbing (`response-injector`), JSONL parsing (`session-watcher`), allowlist auth (`discord-bot`). 4 → 24 tests.
