@@ -82,12 +82,16 @@ claude-bridge is a high-trust tool: **the Discord bot token and the allowlist to
 - **Allowlist bypass.** The killer case. If your user ID is spoofable or if a bug lets an unauthorized ID slip through, that ID gets the `Bash` tool. The bot validates every incoming message against `allowed_user_ids` before any tool runs; a failed check returns a red ❌ reaction and nothing else.
 - **Discord account compromise.** If *your own* Discord account is compromised, the attacker inherits your allowlist seat. Two-factor-auth your Discord account. If you lose it, rotate the bot token *and* remove the compromised user ID from the allowlist.
 - **Network fragility.** Auto-reconnect on disconnect, rate-limited send queue (1 msg/sec), single-instance lockfile prevents split-brain.
+- **Compromised seat with `safe_mode`.** Defense-in-depth for the case where an allowlisted seat is taken over (Discord account compromise above). With `safe_mode: true`, an attacker who lands in your channel and tries `rm -rf …` only gets the read-only tools (`Read` / `Glob` / `Grep`); destructive tools require `!confirm <task>` as a deliberate per-message escalation. Recommended for any setup where the bot is reachable from a phone.
+- **Audit visibility.** With `audit_tool_use: true` (default ON), every tool invocation is mirrored to the Discord channel as `→ <tool> <args>` before execution and `← <tool> ✅ <ms>` (or `❌ Error: …`) after. If your account is compromised, the messages still post to the channel — the legitimate seat-holder sees commands run that they didn't issue, even if the attacker doesn't react to them.
 
 ### Operating recommendations
 
 - `chmod 600 ~/.claude-bridge/config.json`
 - Create a **dedicated** Discord bot (not a user-bot, not shared with another tool). Keep it in one channel only you post in.
 - Keep `allowed_user_ids` to exactly the IDs that need it. For personal use: one ID, your own.
+- **Enable `safe_mode: true` if the bot is reachable from a phone.** With it on, replies that don't start with `!confirm <task>` only get the read-only tools (`Read` / `Glob` / `Grep`); a phone-paste of "delete all the test fixtures" gets a thoughtful written reply, not a `Bash` invocation. Use `!confirm delete the test fixtures` to deliberately allow destructive tools for that turn. Off by default (preserves pre-feature behavior); takes ~1 line of config to flip.
+- Leave `audit_tool_use: true` (the default). The audit lines are how you notice "tools running on my machine that I didn't trigger."
 - Never commit `~/.claude-bridge/config.json` to any repo.
 - If you suspect compromise: revoke the bot token at [discord.com/developers/applications](https://discord.com/developers/applications) first, cleanup second.
 
@@ -145,8 +149,10 @@ One background loop polls `~/.claude/` for active sessions. When a session's JSO
 | `agent_model` | string | `claude-sonnet-4-6` | Model ID passed to the proxy. |
 | `agent_cwd` | string | `$HOME` | Working directory for the agent's `Bash` / `Glob` / `Grep` tools. |
 | `system_prompt` | string | *(generic coding-assistant prompt)* | Override the agent's default system prompt. Useful for scoping the agent to a specific project, persona, or workflow. |
+| `safe_mode` | boolean | `false` | Sandbox unconfirmed replies. With it on, replies without a `!confirm <task>` prefix only get read-only tools (`Read` / `Glob` / `Grep`); destructive tools (`Bash`, `Write`) require an explicit `!confirm`. Recommended for phone-reachable setups. |
+| `audit_tool_use` | boolean | `true` | Stream a `→ <tool>` line before each tool invocation and a `← <tool> ✅ <ms>` line after, with a tail of the output, to the Discord channel. Set to `false` to silence if the channel gets noisy — but the audit trail is what makes a phone-compromised seat noticeable, so default is on. |
 
-All fields can also be set via environment variables — field name uppercased with prefixes for the Discord/Dario/agent groups: `DISCORD_TOKEN`, `DISCORD_CHANNEL_ID`, `ALLOWED_USER_IDS` (comma-separated), `POLL_INTERVAL_MS`, `IDLE_SECONDS`, `NOTIFY_ON_WAITING`, `DARIO_BASE_URL`, `DARIO_API_KEY`, `AGENT_MODEL`, `AGENT_CWD`, `AGENT_SYSTEM_PROMPT`. **Env wins over the file** — lets you rotate a compromised bot token in a container without editing the committed config.
+All fields can also be set via environment variables — field name uppercased with prefixes for the Discord/Dario/agent groups: `DISCORD_TOKEN`, `DISCORD_CHANNEL_ID`, `ALLOWED_USER_IDS` (comma-separated), `POLL_INTERVAL_MS`, `IDLE_SECONDS`, `NOTIFY_ON_WAITING`, `DARIO_BASE_URL`, `DARIO_API_KEY`, `AGENT_MODEL`, `AGENT_CWD`, `AGENT_SYSTEM_PROMPT`, `SAFE_MODE`, `AUDIT_TOOL_USE`. **Env wins over the file** — lets you rotate a compromised bot token in a container without editing the committed config.
 
 ---
 
@@ -165,12 +171,16 @@ claude-bridge --help              # show usage
 
 | Command | Effect |
 |---|---|
-| *(any plain message)* | Runs through the Claude agent loop; agent's answer is posted back. |
-| `!command <text>` | Explicit agent invocation (same as above, useful for disambiguation). |
+| *(any plain message)* | Runs through the Claude agent loop; agent's answer is posted back. With `safe_mode: true`, gets only the read-only tools (`Read` / `Glob` / `Grep`). |
+| `!<text>` | Explicit agent invocation — same as plain message, with a "Running…" preamble. Same `safe_mode` gating. |
+| `/run <text>` | Same as `!<text>`. |
+| `!confirm <text>` | Run with the **full** tool set (`Bash` / `Write` / `Read` / `Glob` / `Grep`) regardless of `safe_mode`. The escape hatch for destructive operations under safe-mode. Match is anchored to the start and case-sensitive. |
 | `/reset` | Clears the agent's conversation context. |
 | `/status` | Checks agent + dario health, replies with a summary. |
 
 Unauthorized users (not in `allowed_user_ids`) get a red ❌ reaction on their message — no command runs.
+
+With `audit_tool_use: true` (the default), each tool invocation posts a two-line audit pair to the channel: `→ <tool> <args-preview>` before, `← <tool> ✅ <ms>` (or `❌ Error: …`) after, with a 5-line / 500-char tail of the output. So a phone-issued `!confirm fix the failing test` shows the model's `→ Read package.json`, `← Read ✅ 4ms`, `→ Bash npm test`, `← Bash ✅ 12534ms`, etc. as it grinds — not just the final answer.
 
 ---
 

@@ -11,6 +11,25 @@ checklist.
 
 ## [Unreleased]
 
+### Added — audit-trail streaming + opt-in safe-mode for phone-origin agent loops
+
+Phase 4: first feature pass after v0.1.0 polish. Both changes target the same gap — when a Discord reply triggers a Claude agent loop on the user's machine, you currently can't see what tools ran (until the final response posts) and you can't gate destructive ones (every reply gets full Bash + Write). On a phone, that's a lot of trust per message.
+
+**Audit-trail streaming.** The agent now posts a two-line audit pair to Discord for every tool invocation: `→ <tool> <args-preview>` before execution, `← <tool> ✅ <ms>` (or `❌ Error: …`) after, with a 5-line / 500-char tail of the output in a code block. Visibility holds for the whole loop, not just the final answer — a 30-second `Bash` step is now an immediate `→ Bash` line followed by `← Bash ✅ 30123ms` when it lands. Default ON (matches the README's threat-model emphasis on auditability); set `audit_tool_use: false` (or `AUDIT_TOOL_USE=false`) to silence it if the channel gets noisy.
+
+Plumbing: `DiscordAgent.process()` refactored from positional args (`onToolUse`, unused `onText`) to a `ProcessOptions` bag (`onToolUse`, `onToolResult`, `allowedTools`). The post-execution callback is the new piece; existing callers move from `agent.process(prompt, onToolUse)` to `agent.process(prompt, { onToolUse })`. Single internal call site updated; no public API users yet (pre-1.0).
+
+**Safe-mode (opt-in sandbox).** New `safe_mode: true` config flag. When on, replies that don't start with `!confirm <task>` get only the read-only tools (`Read`, `Glob`, `Grep`). Replies prefixed with `!confirm ` get the full tool set (`Bash`, `Write`, plus the three reads). Off by default (preserves pre-feature behavior); the README threat-model section recommends turning it on for any setup where the bot is reachable from a phone.
+
+The filter is applied at the API request — the `tools: [...]` array sent to the model is shrunk to the read-only set, so the model literally cannot try to call `Bash` / `Write` on an unconfirmed turn. Cleaner than a post-call deny because it avoids the "model tried, got rejected, retries with the same tool" loop that produces an LLM-call cost without any progress.
+
+**Reply syntax (in addition to existing `!`, `/run`, `/reset`, `/status`):**
+
+- `!confirm <task>` — agent runs with full tools regardless of `safe_mode`. The `!confirm` token is the safe-mode escape hatch; it's anchored to the start of the message (so "should I add a !confirm step here?" does not accidentally elevate that turn) and case-sensitive (so `!CONFIRM` is plain text, not the escape hatch).
+- Plain `<text>` and `!<task>` / `/run <task>` — gated by `safe_mode`. With safe-mode off they all behave exactly as before.
+
+**New pure helpers (`src/agent.ts`):** `parseConfirmPrefix`, `isErrorOutput`, `filterTools`, `READ_ONLY_TOOLS`. Exported so the contracts are unit-testable without spinning up the full agent. 17 new assertions in `test/agent-helpers.test.mjs`; `npm test` total goes 24 → 41 (all green). No new runtime deps.
+
 ### CI — stale-bot housekeeping + labels for parity with dario
 
 Phase 3.5, the "final polish" pass after v0.1.0 shipped:
