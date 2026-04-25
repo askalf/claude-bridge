@@ -28,7 +28,10 @@ const DEFAULT_SYSTEM_PROMPT = [
 
 // ── Tool definitions matching Claude Code ──
 
-const TOOLS = [
+/** Shape of an entry in `TOOLS`. Used by `callApi` and by `filterTools`. */
+type ToolDef = { name: string; description: string; input_schema: unknown };
+
+const TOOLS: ToolDef[] = [
   {
     name: 'Bash',
     description: 'Execute a bash command and return its output.',
@@ -89,6 +92,59 @@ const TOOLS = [
     },
   },
 ];
+
+/**
+ * Read-only tool subset used when sandbox/safe mode is on and the
+ * caller hasn't confirmed the request (i.e. no `!confirm` prefix on
+ * the inbound Discord reply). These three tools can inspect the
+ * filesystem but cannot mutate it or shell out.
+ */
+export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(['Read', 'Glob', 'Grep']);
+
+/**
+ * Strip a `!confirm ` prefix from an inbound message and report whether
+ * it was present. Pure helper — exported so the reply-parser contract
+ * is unit-testable without spinning up the full agent.
+ *
+ * Examples:
+ *   `'!confirm fix the bug'` → `{ confirmed: true,  prompt: 'fix the bug' }`
+ *   `'fix the bug'`          → `{ confirmed: false, prompt: 'fix the bug' }`
+ *   `'!confirm'`             → `{ confirmed: true,  prompt: '' }`   // no prompt
+ *
+ * Match is anchored to the start of the trimmed message; `!confirm`
+ * appearing later in the body is intentionally NOT a confirmation
+ * (otherwise asking "should I add a !confirm step here?" would
+ * accidentally elevate the call).
+ */
+export function parseConfirmPrefix(message: string): { confirmed: boolean; prompt: string } {
+  const trimmed = message.trim();
+  const m = trimmed.match(/^!confirm(?:\s+(.*))?$/s);
+  if (m) return { confirmed: true, prompt: (m[1] ?? '').trim() };
+  return { confirmed: false, prompt: trimmed };
+}
+
+/**
+ * Whether an `executeTool()` return string represents a tool failure.
+ * The catch-block contract (see executeTool) is to return `Error: <msg>`
+ * for thrown errors; success returns are tool-specific output that may
+ * legitimately start with anything else. Exported for unit testing.
+ */
+export function isErrorOutput(s: string): boolean {
+  return s.startsWith('Error: ');
+}
+
+/**
+ * Filter a tool list by an allowedTools set. `undefined` allowed-set
+ * means no restriction (returns the original list). Pure helper —
+ * exported so the safe-mode filter contract is unit-testable.
+ */
+export function filterTools<T extends { name: string }>(
+  tools: readonly T[],
+  allowed: ReadonlySet<string> | undefined,
+): T[] {
+  if (!allowed) return [...tools];
+  return tools.filter(t => allowed.has(t.name));
+}
 
 // ── Tool execution ──
 
@@ -196,6 +252,43 @@ export interface DiscordAgentOptions {
   systemPrompt?: string;
 }
 
+/**
+ * Per-call options for `DiscordAgent.process()`. All fields optional;
+ * the empty bag is the unobservable, full-tool default that matches
+ * pre-feature behavior.
+ */
+export interface ProcessOptions {
+  /**
+   * Fired BEFORE each tool invocation. `args` is JSON-stringified and
+   * truncated to 100 chars (Discord-line-friendly preview).
+   */
+  onToolUse?: (name: string, args: string) => void;
+
+  /**
+   * Fired AFTER each tool invocation completes (success OR error). The
+   * audit-streaming counterpart to onToolUse — gives the caller enough
+   * to render a `← Bash ✓ 1.2s` style line in Discord with a tail of
+   * the output. `error` is set iff the tool returned a string starting
+   * with `'Error: '`; in that case `result === error`.
+   */
+  onToolResult?: (
+    name: string,
+    args: string,
+    result: string,
+    durationMs: number,
+    error?: string,
+  ) => void;
+
+  /**
+   * Restrict the agent to a subset of `TOOLS` for THIS call. `undefined`
+   * (the default) means no restriction. Used by safe-mode to clamp
+   * unconfirmed phone-origin replies to read-only tools (Read / Glob /
+   * Grep). The restriction is applied at the API request — the model
+   * never sees the filtered-out tools, so it can't try to call them.
+   */
+  allowedTools?: ReadonlySet<string>;
+}
+
 export class DiscordAgent {
   private messages: Array<Record<string, unknown>> = [];
   private model: string;
@@ -221,19 +314,18 @@ export class DiscordAgent {
   get isBusy(): boolean { return this.busy; }
 
   /** Process a user message and return the final text response. */
-  async process(
-    userMessage: string,
-    onToolUse?: (name: string, args: string) => void,
-    onText?: (text: string) => void,
-  ): Promise<string> {
+  async process(userMessage: string, opts: ProcessOptions = {}): Promise<string> {
     if (this.busy) return '_Already processing a request. Wait for it to finish._';
     this.busy = true;
+
+    const { onToolUse, onToolResult, allowedTools } = opts;
+    const callTools = filterTools(TOOLS, allowedTools);
 
     try {
       this.messages.push({ role: 'user', content: userMessage });
 
       for (let turn = 0; turn < MAX_TURNS; turn++) {
-        const response = await this.callApi();
+        const response = await this.callApi(callTools);
 
         if (!response) {
           this.busy = false;
@@ -260,10 +352,17 @@ export class DiscordAgent {
             const name = block.name as string;
             const args = block.input as Record<string, unknown>;
             const toolId = block.id as string;
+            const argsStr = JSON.stringify(args);
 
-            if (onToolUse) onToolUse(name, JSON.stringify(args).slice(0, 100));
+            if (onToolUse) onToolUse(name, argsStr.slice(0, 100));
 
+            const t0 = Date.now();
             const output = executeTool(name, args, this.cwd);
+            const durationMs = Date.now() - t0;
+            const error = isErrorOutput(output) ? output : undefined;
+
+            if (onToolResult) onToolResult(name, argsStr, output, durationMs, error);
+
             toolResults.push({
               type: 'tool_result',
               tool_use_id: toolId,
@@ -284,7 +383,7 @@ export class DiscordAgent {
   }
 
   /** Call the Anthropic-compat API (dario by default). */
-  private async callApi(): Promise<Record<string, unknown> | null> {
+  private async callApi(callTools: readonly ToolDef[]): Promise<Record<string, unknown> | null> {
     try {
       const res = await fetch(`${this.baseUrl}/v1/messages`, {
         method: 'POST',
@@ -298,7 +397,7 @@ export class DiscordAgent {
           max_tokens: 8192,
           system: this.systemPrompt,
           messages: this.messages,
-          tools: TOOLS,
+          tools: callTools,
         }),
       });
 

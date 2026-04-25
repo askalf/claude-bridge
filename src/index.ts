@@ -16,7 +16,7 @@
 import { SessionWatcher, type SessionEvent } from './session-watcher.js';
 import { DiscordBot } from './discord-bot.js';
 import { writePendingReply, readPendingReply } from './response-injector.js';
-import { DiscordAgent } from './agent.js';
+import { DiscordAgent, parseConfirmPrefix, READ_ONLY_TOOLS } from './agent.js';
 import { readFileSync, existsSync, writeFileSync, unlinkSync } from 'node:fs';
 
 // ── Single instance lock ──
@@ -65,6 +65,22 @@ interface Config {
   agent_model?: string;
   agent_cwd?: string;
   system_prompt?: string;
+  // Safety
+  /**
+   * Sandbox phone-origin replies. When `true`, replies that don't start
+   * with `!confirm <task>` get only the read-only tools (Read, Glob,
+   * Grep). Replies prefixed with `!confirm ` get the full tool set
+   * (Bash, Write, Read, Glob, Grep). Default: `false` (full tools for
+   * all replies, matches pre-feature behavior).
+   */
+  safe_mode?: boolean;
+  /**
+   * Stream a `→ <tool>` line on tool invocation and a `← <tool> ✓ Nms`
+   * line on tool completion (with a tail of the output) into the
+   * Discord channel. Audit trail for remote-triggered tool runs.
+   * Default: `true`.
+   */
+  audit_tool_use?: boolean;
 }
 
 // Env vars win over the config file — the README promises this. Used to
@@ -102,6 +118,8 @@ function loadConfig(): Config {
     agent_model:             env.AGENT_MODEL                      ?? fromFile.agent_model,
     agent_cwd:               env.AGENT_CWD                        ?? fromFile.agent_cwd,
     system_prompt:           env.AGENT_SYSTEM_PROMPT              ?? fromFile.system_prompt,
+    safe_mode:               boolEnv(env.SAFE_MODE)               ?? fromFile.safe_mode,
+    audit_tool_use:          boolEnv(env.AUDIT_TOOL_USE)          ?? fromFile.audit_tool_use,
   };
 
   if (!cfg.discord_token || !cfg.discord_channel_id) {
@@ -158,10 +176,22 @@ Config file (~/.claude-bridge/config.json):
     "notify_on_waiting": true,
     "dario_base_url":    "http://localhost:3456",
     "dario_api_key":     "dario",
-    "system_prompt":     "(optional — override the agent's default system prompt)"
+    "system_prompt":     "(optional — override the agent's default system prompt)",
+    "safe_mode":         false,
+    "audit_tool_use":    true
   }
 
 Env vars override the file. See README for the full list.
+
+Reply syntax:
+  <plain text>          Implicit agent call.
+  !<task>               Explicit agent call (preamble + clearer audit trail).
+  /run <task>           Same as !<task>.
+  !confirm <task>       Run with full tools regardless of safe_mode.
+                        (Read/Glob/Grep are always allowed; Bash/Write
+                         require !confirm when safe_mode is on.)
+  /reset                Clear the agent's conversation history.
+  /status               Print agent + dario health.
 `);
     process.exit(0);
   }
@@ -254,30 +284,65 @@ Env vars override the file. See README for the full list.
     // pick it up (see hooks/check-reply.sh).
     writePendingReply({ content, author: reply.author, timestamp: reply.timestamp });
 
-    // If message starts with !, run through the agent loop directly
-    if (content.startsWith('!') || content.startsWith('/run ')) {
-      const prompt = content.startsWith('!') ? content.slice(1).trim() : content.slice(5).trim();
-      if (!prompt) return;
-
-      bot.send(`Running...`).catch(() => {});
-
-      const response = await agent.process(
-        prompt,
-        (name, args) => { bot.send(`\`[${name}]\` ${args}`).catch(() => {}); },
-      );
-
-      // Split long responses across multiple messages
-      const chunks = splitMessage(response);
-      for (const chunk of chunks) {
-        await bot.send(chunk);
-      }
+    // Resolve dispatch:
+    //   !confirm <task>  → safe-mode escape hatch; full tools regardless of safe_mode
+    //   !<task>          → explicit agent call (tools gated by safe_mode)
+    //   /run <task>      → explicit agent call (tools gated by safe_mode)
+    //   <plain text>     → implicit agent call (tools gated by safe_mode)
+    // `!confirm` is parsed FIRST so it wins over the bare `!` prefix.
+    const confirm = parseConfirmPrefix(content);
+    let prompt: string;
+    let isExplicit: boolean;
+    if (confirm.confirmed) {
+      prompt = confirm.prompt;
+      isExplicit = true;
+    } else if (content.startsWith('!')) {
+      prompt = content.slice(1).trim();
+      isExplicit = true;
+    } else if (content.startsWith('/run ')) {
+      prompt = content.slice(5).trim();
+      isExplicit = true;
     } else {
-      // Regular message — run through agent
-      const response = await agent.process(content);
-      const chunks = splitMessage(response);
-      for (const chunk of chunks) {
-        await bot.send(chunk);
-      }
+      prompt = content;
+      isExplicit = false;
+    }
+    if (!prompt) return;
+
+    const safeMode = config.safe_mode === true;
+    // safe_mode + unconfirmed → restrict to read-only tools. The
+    // `tools: [...]` array sent to the model is filtered, so the model
+    // never sees Bash/Write and can't try to call them.
+    const allowedTools = (safeMode && !confirm.confirmed) ? READ_ONLY_TOOLS : undefined;
+
+    if (isExplicit) {
+      let preamble = 'Running...';
+      if (safeMode) preamble += confirm.confirmed ? ' (confirmed: full tools)' : ' (safe-mode: read-only tools, use `!confirm <task>` for full)';
+      bot.send(preamble).catch(() => {});
+    }
+
+    // Audit trail for remote-triggered tool runs. Two lines per tool
+    // call: `→ <name> <args-preview>` before, `← <name> ✓/✗ <ms>` plus
+    // a 5-line / 500-char tail of the output after. Default ON; can be
+    // disabled via `audit_tool_use: false` if too noisy for the channel.
+    const auditEnabled = config.audit_tool_use !== false;
+    const onToolUse = auditEnabled
+      ? (name: string, args: string) => { bot.send(`\`→ ${name}\` ${args}`).catch(() => {}); }
+      : undefined;
+    const onToolResult = auditEnabled
+      ? (name: string, _args: string, result: string, durationMs: number, error?: string) => {
+          const status = error ? '❌' : '✅';
+          const tail = result.split('\n').slice(0, 5).join('\n').slice(0, 500);
+          const lines = [`\`← ${name} ${status} ${durationMs}ms\``];
+          if (tail) lines.push('```', tail, '```');
+          bot.send(lines.join('\n')).catch(() => {});
+        }
+      : undefined;
+
+    const response = await agent.process(prompt, { onToolUse, onToolResult, allowedTools });
+
+    const chunks = splitMessage(response);
+    for (const chunk of chunks) {
+      await bot.send(chunk);
     }
   });
 
